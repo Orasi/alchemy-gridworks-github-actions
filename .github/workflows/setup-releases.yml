@@ -1,0 +1,73 @@
+name: Setup Release
+
+on:
+  workflow_call:
+    inputs:
+      testPlatform:
+        required: true
+        type: string
+
+jobs:
+  check-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Authenticate GitHub CLI
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh auth status
+
+      - name: Check if release exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}      
+        id: check-release
+        continue-on-error: false
+        run: |
+          LATEST_TAG=$(gh release list --repo ${{ github.repository }} --json tagName -q ".[] | select(.tagName | startswith(\"${{ inputs.testPlatform }}\")) | .tagName" | head -n 1)
+
+          if [ -z "$LATEST_TAG" ]; then
+            echo "❌ No release found for ${{ inputs.testPlatform }} in ${{ github.repository }}." | tee -a $GITHUB_STEP_SUMMARY
+            NEW_TAG="${{ inputs.testPlatform }}-v1.0"
+
+            # Check if tag exists before creating the release
+            TAG_EXISTS=$(git ls-remote --tags https://github.com/${{ github.repository }}.git | grep "refs/tags/$NEW_TAG" || echo "")
+
+            if [ -z "$TAG_EXISTS" ]; then
+              echo "➡️ Creating and pushing tag $NEW_TAG..."
+              git tag "$NEW_TAG"
+              git push origin "$NEW_TAG"
+
+              echo "➡️ Creating a new published release with tag $NEW_TAG..."
+              gh release create "$NEW_TAG" \
+                --repo ${{ github.repository }} \
+                --title "${{ inputs.testPlatform }} Initial Release" \
+                --notes "This release is created automatically for ${{ inputs.testPlatform }} test execution." \
+                --verify-tag
+            else
+              echo "⚠️ Tag $NEW_TAG already exists but no release is associated with it. Skipping creation."
+            fi
+            
+            LATEST_TAG="$NEW_TAG"
+          else
+            echo "✅ Release $LATEST_TAG already exists for ${{ inputs.testPlatform }}."
+          fi
+          
+          echo "LATEST_TAG=$LATEST_TAG" >> $GITHUB_ENV
+
+      - name: Determine JAR file
+        id: determine-jar
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}           
+        continue-on-error: false
+        run: |
+          JAR_NAME=$(gh release view "$LATEST_TAG" --repo ${{ github.repository }} --json assets -q ".assets[] | select(.name | endswith(\".jar\")) | .name" | head -n 1)
+
+          if [ -z "$JAR_NAME" ]; then
+            echo "❌ No JAR file found in the $LATEST_TAG release for ${{ inputs.testPlatform }}." | tee -a $GITHUB_STEP_SUMMARY
+            echo "➡️ Please upload a .jar file to https://github.com/${{ github.repository }}/releases/tag/$LATEST_TAG" | tee -a $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+          
+          echo "JAR_NAME=$JAR_NAME" >> $GITHUB_ENV

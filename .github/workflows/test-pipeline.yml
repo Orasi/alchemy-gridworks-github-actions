@@ -1,0 +1,175 @@
+name: Setup and Run Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      testPlatform:
+        description: "Test platform (SELENIUM or PLAYWRIGHT)"
+        required: true
+        default: "SELENIUM"
+        type: choice
+        options:
+          - SELENIUM
+          - PLAYWRIGHT
+      apiUrl:
+        description: "API URL for the testing service"
+        required: true
+        default: "https://alchemytesting.cloud"
+      browserConfig:
+        description: "JSON payload for browser configuration"
+        required: true
+        default: "{\"chromeCount\":1,\"firefoxCount\":1,\"edgeCount\":1,\"inactivityTimeout\":900,\"nodeInactivityTimeout\":900,\"nodeInactivityInitialTimeout\":900}"
+      testSuite:
+        description: "Name of the test suite JAR file"
+        required: false
+
+jobs:
+
+  check-release:
+    uses: ./.github/workflows/setup-releases.yml
+    with:
+      testPlatform: ${{ inputs.testPlatform }}
+
+  setup-grid:
+    uses: ./.github/workflows/setup-grid.yml
+    needs: [check-release]
+    with:
+      testPlatform: ${{ inputs.testPlatform }}
+      apiUrl: ${{ inputs.apiUrl }}
+      browserConfig: ${{ inputs.browserConfig }}
+    secrets:
+      API_KEY: ${{ secrets.API_KEY }}
+      SECRET_KEY: ${{ secrets.SECRET_KEY }}
+
+  install-deps:
+    runs-on: ubuntu-latest
+    needs: [check-release]
+    steps:
+      - name: Cache dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/dependencies
+          key: ${{ runner.os }}-deps-${{ inputs.testPlatform }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-deps-${{ inputs.testPlatform }}-
+
+      - name: Install OpenJDK 23 (Eclipse Temurin)
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin'
+          java-version: '23'
+
+      - name: Install Playwright dependencies (if PLAYWRIGHT)
+        if: inputs.testPlatform == 'PLAYWRIGHT'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwoff1 \
+            libvpx9 \
+            libevent-2.1-7 \
+            libopus0 \
+            libgstreamer-plugins-base1.0-0 \
+            libgstreamer-gl1.0-0 \
+            libgstreamer-plugins-bad1.0-0 \
+            libflite1 \
+            libavif16 \
+            libharfbuzz-icu0 \
+            libsecret-1-0 \
+            libhyphen0 \
+            libmanette-0.2-0 \
+            libgles2 \
+            gstreamer1.0-libav \
+            libssl-dev \
+            libstdc++6 \
+            libnss3 \
+            libatk1.0-0 \
+            libatk-bridge2.0-0 \
+            libcups2 \
+            libgbm1 \
+            libasound2t64 \
+            libpango-1.0-0 \
+            libxss1 || echo "Some packages failed to install, continuing anyway"
+
+  run-tests:
+    runs-on: ubuntu-latest
+    needs: [setup-grid, install-deps]  
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set environment variables from outputs
+        run: |
+          echo "PROXY_URL=${{ needs.setup-grid.outputs.PROXY_URL }}" >> $GITHUB_ENV
+          echo "GRID_ID=${{ needs.setup-grid.outputs.GRID_ID }}" >> $GITHUB_ENV
+
+      - name: Restore dependencies cache
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/dependencies
+          key: ${{ runner.os }}-deps-${{ inputs.testPlatform }}-${{ github.sha }}
+
+      - name: Authenticate GitHub CLI
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
+
+      - name: Determine JAR file
+        id: determine-jar
+        run: |
+          if [ -n "${{ inputs.testSuite }}" ]; then
+            JAR_NAME="${{ inputs.testSuite }}"
+            echo "Using provided test suite: $JAR_NAME"
+          else
+            echo "No testSuite provided. Searching for a .jar file in the latest release..."
+            LATEST_TAG=$(gh release list --repo ${{ github.repository }} --json tagName -q ".[] | select(.tagName | startswith(\"${{ inputs.testPlatform }}\")) | .tagName" | head -n 1)
+            if [ -n "$LATEST_TAG" ]; then
+              JAR_NAME=$(gh release view "$LATEST_TAG" --repo ${{ github.repository }} --json assets -q ".assets[] | select(.name | endswith(\".jar\")) | .name" | head -n 1)
+              if [ -z "$JAR_NAME" ]; then
+                echo "❌ No JAR file found in the $LATEST_TAG release for ${{ inputs.testPlatform }}." | tee -a $GITHUB_STEP_SUMMARY
+                echo "➡️ Please upload a .jar file to https://github.com/${{ github.repository }}/releases/tag/$LATEST_TAG" | tee -a $GITHUB_STEP_SUMMARY
+                exit 1
+              fi
+            else
+              echo "❌ No matching release found for ${{ inputs.testPlatform }} in ${{ github.repository }}." | tee -a $GITHUB_STEP_SUMMARY
+              echo "➡️ Please create a release with a tag starting with ${{ inputs.testPlatform }} (e.g., ${{ inputs.testPlatform }}-v1.0)" | tee -a $GITHUB_STEP_SUMMARY
+              exit 1
+            fi
+          fi
+          echo "JAR_NAME=$JAR_NAME" >> $GITHUB_ENV
+          echo "LATEST_TAG=$LATEST_TAG" >> $GITHUB_ENV
+
+      - name: Cache test JAR
+        id: cache-jar
+        uses: actions/cache@v3
+        with:
+          path: ${{ env.JAR_NAME }}
+          key: ${{ runner.os }}-jar-${{ inputs.testPlatform }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-jar-${{ inputs.testPlatform }}-
+
+      - name: Download test JAR
+        if: steps.cache-jar.outputs.cache-hit != 'true'
+        run: |
+          gh release download "$LATEST_TAG" \
+            --repo ${{ github.repository }} \
+            --pattern "${{ env.JAR_NAME }}" \
+            --output "${{ env.JAR_NAME }}" \
+            --clobber
+
+      - name: Debug Proxy URL and Grid ID
+        run: |
+          echo "Proxy URL is ${{ env.PROXY_URL }}"
+          echo "GRID_ID is ${{ env.GRID_ID }}"
+
+      - name: Run tests
+        run: |
+          echo "Running tests using JAR: ${{ env.JAR_NAME }}"
+          if [ "${{ inputs.testPlatform }}" = "PLAYWRIGHT" ]; then
+            ( java -jar "${{ env.JAR_NAME }}" -CLD_gridId "${{ env.GRID_ID }}" -CLD_apiKey ${{ secrets.API_KEY }} -CLD_secretKey ${{ secrets.SECRET_KEY }} -HTM_outputFolder "${{ github.workspace }}/results/" ) || true
+          else
+            ( java -Dalchemy.cloud.url="${{ env.PROXY_URL }}" -jar "${{ env.JAR_NAME }}" -CLD_apiKey ${{ secrets.API_KEY }} -CLD_secretKey ${{ secrets.SECRET_KEY }} -HTM_outputFolder "${{ github.workspace }}/results/" ) || true
+          fi
+
+      - name: Upload Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: ${{ github.workspace }}/results/

@@ -1,0 +1,73 @@
+name: Setup Test Grid
+
+on:
+  workflow_call:
+    inputs:
+      testPlatform:
+        description: "Test platform (SELENIUM or PLAYWRIGHT)"
+        required: true
+        type: string
+      apiUrl:
+        description: "API URL for the testing service"
+        required: true
+        type: string
+      browserConfig:
+        description: "JSON payload for browser configuration"
+        required: true
+        type: string
+    secrets:
+      API_KEY:
+        required: true
+      SECRET_KEY:
+        required: true
+    outputs:
+      PROXY_URL:
+        description: "The proxy URL set by prepare.sh"
+        value: ${{ jobs.setup-grid.outputs.PROXY_URL }}
+      GRID_ID:
+        description: "The grid ID set by prepare.sh"
+        value: ${{ jobs.setup-grid.outputs.GRID_ID }}
+  workflow_dispatch:
+    inputs:
+      testPlatform:
+        description: "Test platform (SELENIUM or PLAYWRIGHT)"
+        required: true
+        default: "SELENIUM"
+        type: choice
+        options:
+          - SELENIUM
+          - PLAYWRIGHT
+      apiUrl:
+        description: "API URL for the testing service"
+        required: true
+        default: "https://alchemytesting.cloud"
+      browserConfig:
+        description: "JSON payload for browser configuration"
+        required: true
+        default: "{\"chromeCount\":1,\"firefoxCount\":1,\"edgeCount\":1,\"inactivityTimeout\":900,\"nodeInactivityTimeout\":900,\"nodeInactivityInitialTimeout\":900}"
+
+jobs:
+  setup-grid:
+    runs-on: ubuntu-latest
+    outputs:
+      PROXY_URL: ${{ steps.set-outputs.outputs.PROXY_URL }}
+      GRID_ID: ${{ steps.set-outputs.outputs.GRID_ID }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up grid
+        run: |
+          chmod +x scripts/prepare.sh
+          ./scripts/prepare.sh "${{ inputs.apiUrl }}" "${{ secrets.API_KEY }}" "${{ secrets.SECRET_KEY }}" "${{ inputs.testPlatform }}" '${{ inputs.browserConfig }}'
+          EXIT_CODE=$?
+          if [[ "$EXIT_CODE" -ne 0 ]]; then
+            echo "Error: prepare.sh failed with exit code $EXIT_CODE"
+            exit $EXIT_CODE
+          fi
+
+      - name: Set outputs
+        id: set-outputs
+        run: |
+          echo "PROXY_URL=${{ env.PROXY_URL }}" >> $GITHUB_OUTPUT
+          echo "GRID_ID=${{ env.GRID_ID }}" >> $GITHUB_OUTPUT
