@@ -159,6 +159,11 @@ jobs:
           echo "Proxy URL is ${{ env.PROXY_URL }}"
           echo "GRID_ID is ${{ env.GRID_ID }}"
 
+      - name: Visualize test in GridWorks
+        run: |
+          GRID_UI_URL=$(echo "${{ inputs.apiUrl }}" | sed 's|://|://ui.|')/nodelist/${{ env.GRID_ID }}
+          echo "➡️ Visualize your test running in Alchemy GridWorks at $GRID_UI_URL" | tee -a $GITHUB_STEP_SUMMARY
+
       - name: Run tests
         run: |
           echo "Running tests using JAR: ${{ env.JAR_NAME }}"
